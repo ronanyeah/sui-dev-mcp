@@ -46,7 +46,10 @@ impl SuiService {
         let output = std::process::Command::new("sui")
             .arg("move")
             .arg("test")
-            .arg("--json-errors")
+            // JSON output provides insufficient information
+            // https://github.com/MystenLabs/sui/blob/5f28d37e21e4064a99bb2fff08210c8a62fbbb94/external-crates/move/crates/move-compiler/src/diagnostics/mod.rs#L86
+            //.arg("--json-errors")
+            .arg("--force")
             .current_dir(&self.project_folder)
             .output()
             .map_err(|e| {
@@ -58,18 +61,25 @@ impl SuiService {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let err = String::from_utf8_lossy(&output.stderr);
-        if stdout.contains("Test failures") {
-            Ok(CallToolResult::success(vec![Content::text(stdout)]))
-        } else if err.is_empty() {
-            Ok(CallToolResult::success(vec![Content::text(
-                "OK".to_string(),
-            )]))
+
+        let (ws, es) = extract_build_output(&err);
+
+        let test_results = if stdout.contains("Test failures") {
+            let data = parse_test_output(&stdout);
+            Some(format!("FAILED:\n\n{}", data.trim()))
+        } else if stdout.contains("Test result: OK") {
+            Some("PASSED".to_string())
         } else {
-            let err_data: serde_json::Value = serde_json::from_str(&err)
-                .map_err(|_| McpError::internal_error("Sui error serialize fail", None))?;
-            let out = Content::json(err_data)?;
-            Ok(CallToolResult::success(vec![out]))
-        }
+            None
+        };
+
+        let body = serde_json::json!({
+            "warnings": ws,
+            "buildErrors": es,
+            "testResults": test_results
+        });
+        let out = Content::json(body)?;
+        Ok(CallToolResult::success(vec![out]))
     }
 }
 
@@ -107,4 +117,58 @@ fn build_fmt_command(cmd_str: &str) -> std::process::Command {
         cmd.arg(part);
     }
     cmd
+}
+
+fn parse_test_output(s: &str) -> String {
+    remove_before(s, "Test failures")
+}
+
+fn remove_before(s: &str, pattern: &str) -> String {
+    s.find(pattern)
+        .map(|idx| &s[idx..])
+        .unwrap_or(s)
+        .to_string()
+}
+
+fn extract_build_output(input: &str) -> (Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    let v = strip_ansi_escapes::strip(input);
+    let s = String::from_utf8_lossy(&v);
+    let mut lines = s.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        if line.starts_with("warning[") {
+            let mut warning_block = String::new();
+            warning_block.push_str(line);
+            warning_block.push('\n');
+
+            while let Some(next_line) = lines.peek() {
+                if next_line.starts_with("  =") {
+                    lines.next(); // Consume the '=' line
+                    break;
+                }
+                warning_block.push_str(lines.next().unwrap());
+                warning_block.push('\n');
+            }
+            warnings.push(warning_block.trim().to_string());
+        } else if line.starts_with("error[") {
+            let mut error_block = String::new();
+            error_block.push_str(line);
+            error_block.push('\n');
+
+            while let Some(next_line) = lines.peek() {
+                if next_line.is_empty() {
+                    lines.next(); // Consume the empty line
+                    break;
+                }
+                error_block.push_str(lines.next().unwrap());
+                error_block.push('\n');
+            }
+            errors.push(error_block.trim().to_string());
+        }
+    }
+
+    (warnings, errors)
 }
