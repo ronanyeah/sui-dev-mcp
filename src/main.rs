@@ -1,10 +1,6 @@
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use sui_dev_mcp::service::SuiService;
-use tracing_subscriber::{
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    {self},
-};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(serde::Deserialize)]
 struct Env {
